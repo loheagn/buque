@@ -3,6 +3,7 @@ name = "buque"
 version = "0.1.0"
 description = "Buque PDF bookmark tagging tool (M1)"
 readme = "README.md"
+license = "MIT"
 authors = [
     { name = "loheagn", email = "loheagn@icloud.com" }
 ]
