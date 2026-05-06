@@ -1,0 +1,20 @@
+score_weights:
+  style: 0.45
+  position: 0.2
+  pattern: 0.25
+  semantic: 0.1
+
+thresholds:
+  high: 0.68
+  text_ratio_high: 0.8
+  text_ratio_low: 0.2
+  min_text_chars_per_page: 20
+  max_level_jump: 1
+
+rules:
+  min_line_chars: 2
+  max_line_chars: 120
+  min_style_candidate: 0.35
+  min_pattern_candidate: 0.5
+  min_semantic_candidate: 0.5
+  max_candidates_per_page: 80
