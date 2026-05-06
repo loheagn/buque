@@ -7,6 +7,7 @@ from buque.core.config import ScoreWeights
 _CHINESE_CHAPTER_RE = re.compile(r"^\s*第[零一二三四五六七八九十百千万〇\d]+章")
 _CHINESE_SECTION_RE = re.compile(r"^\s*第[零一二三四五六七八九十百千万〇\d]+节")
 _ENGLISH_CHAPTER_RE = re.compile(r"^\s*chapter\s+\d+\b", flags=re.IGNORECASE)
+_ENGLISH_SECTION_RE = re.compile(r"^\s*section\s+\d+\b", flags=re.IGNORECASE)
 _APPENDIX_RE = re.compile(r"^\s*(附录|appendix)\b", flags=re.IGNORECASE)
 _DECIMAL_HEADING_RE = re.compile(r"^\s*(\d+(?:\.\d+){0,5})(?:\s+|$)")
 
@@ -48,7 +49,7 @@ def pattern_score(text: str) -> float:
         return 0.0
     if _CHINESE_CHAPTER_RE.match(value) or _ENGLISH_CHAPTER_RE.match(value) or _APPENDIX_RE.match(value):
         return 1.0
-    if _CHINESE_SECTION_RE.match(value):
+    if _CHINESE_SECTION_RE.match(value) or _ENGLISH_SECTION_RE.match(value):
         return 0.9
     if _DECIMAL_HEADING_RE.match(value):
         return 1.0
@@ -68,7 +69,7 @@ def infer_numbered_level(text: str) -> int | None:
         return None
     if _CHINESE_CHAPTER_RE.match(value) or _ENGLISH_CHAPTER_RE.match(value) or _APPENDIX_RE.match(value):
         return 1
-    if _CHINESE_SECTION_RE.match(value):
+    if _CHINESE_SECTION_RE.match(value) or _ENGLISH_SECTION_RE.match(value):
         return 2
     matched = _DECIMAL_HEADING_RE.match(value)
     if not matched:

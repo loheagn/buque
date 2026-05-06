@@ -123,7 +123,8 @@ def _estimate_body_font_size(lines: list[TextLine]) -> float:
     if not sizes:
         return 12.0
     rounded_counts = Counter(round(size, 1) for size in sizes)
-    return float(rounded_counts.most_common(1)[0][0])
+    body_size, _ = sorted(rounded_counts.items(), key=lambda item: (-item[1], item[0]))[0]
+    return float(body_size)
 
 
 def _estimate_body_font_name(lines: list[TextLine], body_font_size: float) -> str:

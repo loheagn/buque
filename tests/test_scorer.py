@@ -17,6 +17,7 @@ def test_total_score_uses_fixed_weights() -> None:
 def test_numbered_level_inference() -> None:
     assert infer_numbered_level("Chapter 2 Data Pipeline") == 1
     assert infer_numbered_level("第3章 测试策略") == 1
+    assert infer_numbered_level("Section 2 Background") == 2
     assert infer_numbered_level("第2节 背景") == 2
     assert infer_numbered_level("1.2.3 Storage") == 3
     assert infer_numbered_level("random body text") is None
