@@ -35,8 +35,8 @@ def add_bookmarks(
         writable=True,
         resolve_path=True,
     ),
-    lang: str = typer.Option("zh", "--lang", help="Language hint for OCR/LLM extensions."),
-    enable_ocr: bool = typer.Option(False, "--enable-ocr", help="Reserved OCR switch for future stages."),
+    lang: str = typer.Option("zh", "--lang", help="Language hint passed to the OCR backend."),
+    enable_ocr: bool = typer.Option(False, "--enable-ocr", help="Enable OCR routing for scanned or hybrid PDFs."),
     enable_llm: bool = typer.Option(False, "--enable-llm", help="Reserved LLM switch for future stages."),
     report_path: Path = typer.Option(
         Path("report.json"),
@@ -54,6 +54,16 @@ def add_bookmarks(
         dir_okay=False,
         resolve_path=True,
     ),
+    config_path: Path | None = typer.Option(
+        None,
+        "--config",
+        help="Optional YAML config path.",
+        exists=True,
+        file_okay=True,
+        dir_okay=False,
+        readable=True,
+        resolve_path=True,
+    ),
 ) -> None:
     result = run_add_bookmarks(
         input_path=input_path,
@@ -63,6 +73,7 @@ def add_bookmarks(
         lang=lang,
         enable_ocr=enable_ocr,
         enable_llm=enable_llm,
+        config_path=config_path,
     )
     if result.success:
         typer.echo(result.message)

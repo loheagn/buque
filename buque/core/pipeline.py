@@ -9,11 +9,13 @@ import fitz
 
 from buque.core.candidate_rules import extract_candidates
 from buque.core.classify import classify_document
-from buque.core.config import load_config
+from buque.core.config import RuleConfig, ScoreWeights, load_config
 from buque.core.extract_text import extract_text_lines
 from buque.core.models import CandidateHeading, TocNode
+from buque.core.ocr_extract import OCRExtractionResult, extract_ocr_candidates
 from buque.core.tree_builder import build_toc_nodes
 from buque.core.writer import write_bookmarks
+from buque.ocr import CommandOCRBackend, NoopOCRBackend, OCRBackend
 
 
 @dataclass(slots=True)
@@ -35,8 +37,8 @@ def run_add_bookmarks(
     enable_ocr: bool,
     enable_llm: bool,
     config_path: Path | None = None,
+    ocr_backend: OCRBackend | None = None,
 ) -> PipelineResult:
-    del lang  # M1 keeps language as API placeholder.
     report = _new_report(enable_ocr=enable_ocr, enable_llm=enable_llm)
     toc_nodes: list[TocNode] = []
 
@@ -62,35 +64,71 @@ def run_add_bookmarks(
             report["doc_type"] = classified.doc_type
             report["page_count"] = classified.page_count
             report["text_page_ratio"] = classified.text_page_ratio
-            if classified.doc_type != "text":
+            report["text_pages"] = classified.text_pages
+            if classified.doc_type != "text" and not enable_ocr:
                 report["unsupported_doc_type"] = True
                 report["errors"].append("unsupported_doc_type")
-                if enable_ocr:
-                    report["errors"].append("ocr_not_implemented_in_m1")
                 return _finalize_result(
                     success=False,
                     exit_code=2,
-                    message=f"Unsupported document type for M1: {classified.doc_type}.",
+                    message=f"Unsupported document type without OCR: {classified.doc_type}.",
                     report=report,
                     toc_nodes=[],
                     report_path=report_path,
                     toc_path=toc_json_path,
                 )
 
-            lines = extract_text_lines(doc)
-            extraction = extract_candidates(
-                lines,
+            backend = _resolve_ocr_backend(ocr_backend)
+            if classified.doc_type != "text" and isinstance(backend, NoopOCRBackend):
+                report["unsupported_doc_type"] = True
+                report["errors"].append("ocr_backend_unavailable")
+                return _finalize_result(
+                    success=False,
+                    exit_code=2,
+                    message="OCR was requested, but no OCR backend is configured.",
+                    report=report,
+                    toc_nodes=[],
+                    report_path=report_path,
+                    toc_path=toc_json_path,
+                )
+
+            text_candidates, text_stats = _extract_text_candidates(
+                doc=doc,
                 rules=config.rules,
                 score_weights=config.score_weights,
             )
-            report["candidate_count"] = len(extraction.candidates)
-            report["rule_stats"] = {
-                **extraction.rule_stats,
+            candidates = list(text_candidates)
+            rule_stats = {
+                **text_stats,
                 "threshold_high": config.thresholds.high,
+                "text_candidate_count": float(len(text_candidates)),
             }
 
+            if enable_ocr:
+                ocr_page_indexes = _ocr_page_indexes(
+                    doc_type=classified.doc_type,
+                    page_char_counts=classified.page_char_counts,
+                    min_text_chars_per_page=config.thresholds.min_text_chars_per_page,
+                )
+                if ocr_page_indexes:
+                    ocr_result = extract_ocr_candidates(
+                        doc,
+                        page_indexes=ocr_page_indexes,
+                        backend=backend,
+                        lang=lang,
+                        rules=config.rules,
+                        score_weights=config.score_weights,
+                    )
+                    report["feature_flags"]["ocr_executed"] = True
+                    candidates.extend(ocr_result.candidates)
+                    rule_stats.update(ocr_result.stats)
+                    _add_ocr_errors(report, ocr_result)
+
+            report["candidate_count"] = len(candidates)
+            report["rule_stats"] = rule_stats
+
             accepted, rejected_low = _split_candidates(
-                extraction.candidates,
+                candidates,
                 high_threshold=config.thresholds.high,
             )
             tree_result = build_toc_nodes(accepted, max_level_jump=config.thresholds.max_level_jump)
@@ -99,6 +137,18 @@ def run_add_bookmarks(
             report["accepted_count"] = len(toc_nodes)
             report["rejected_nodes"] = [*rejected_low, *tree_result.rejected_nodes]
             report["rejected_count"] = len(report["rejected_nodes"])
+
+            if classified.doc_type != "text" and not candidates:
+                report["errors"].append("ocr_no_candidates")
+                return _finalize_result(
+                    success=False,
+                    exit_code=2,
+                    message="OCR completed, but no bookmark candidates were detected.",
+                    report=report,
+                    toc_nodes=[],
+                    report_path=report_path,
+                    toc_path=toc_json_path,
+                )
 
         write_bookmarks(input_path=input_path, output_path=output_path, toc_nodes=toc_nodes)
         return _finalize_result(
@@ -146,7 +196,58 @@ def _split_candidates(
 def _is_high_confidence(candidate: CandidateHeading, *, high_threshold: float) -> bool:
     if candidate.total_score >= high_threshold:
         return True
+    if candidate.source == "ocr" and candidate.semantic_score >= 0.6 and candidate.position_score >= 0.6:
+        return True
     return candidate.pattern_score >= 1.0 and candidate.style_score >= 0.5
+
+
+def _extract_text_candidates(
+    *,
+    doc: fitz.Document,
+    rules: RuleConfig,
+    score_weights: ScoreWeights,
+) -> tuple[list[CandidateHeading], dict[str, float]]:
+    lines = extract_text_lines(doc)
+    extraction = extract_candidates(
+        lines,
+        rules=rules,
+        score_weights=score_weights,
+    )
+    return extraction.candidates, extraction.rule_stats
+
+
+def _resolve_ocr_backend(ocr_backend: OCRBackend | None) -> OCRBackend:
+    if ocr_backend is not None:
+        return ocr_backend
+    command_backend = CommandOCRBackend.from_environment()
+    if command_backend is not None:
+        return command_backend
+    return NoopOCRBackend()
+
+
+def _ocr_page_indexes(
+    *,
+    doc_type: str,
+    page_char_counts: list[int],
+    min_text_chars_per_page: int,
+) -> list[int]:
+    if doc_type == "text":
+        return []
+    if doc_type == "scanned":
+        return list(range(len(page_char_counts)))
+    return [
+        page_index
+        for page_index, char_count in enumerate(page_char_counts)
+        if char_count < min_text_chars_per_page
+    ]
+
+
+def _add_ocr_errors(report: dict[str, Any], ocr_result: OCRExtractionResult) -> None:
+    if not ocr_result.errors:
+        return
+    report["ocr_errors"] = ocr_result.errors
+    if "ocr_backend_error" not in report["errors"]:
+        report["errors"].append("ocr_backend_error")
 
 
 def _new_report(*, enable_ocr: bool, enable_llm: bool) -> dict[str, Any]:
