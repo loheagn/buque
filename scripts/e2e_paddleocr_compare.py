@@ -29,18 +29,20 @@ def main() -> None:
     parser.add_argument("--source", type=Path, default=Path("test-with-toc.pdf"))
     parser.add_argument("--workdir", type=Path, default=Path("artifacts/e2e-paddleocr"))
     parser.add_argument("--ocr-version", default="PP-OCRv5")
+    parser.add_argument("--ocr-strategy", default="toc-guided", choices=["full-page", "toc-guided"])
     parser.add_argument("--lang", default="ch")
     parser.add_argument("--skip-run", action="store_true")
     args = parser.parse_args()
 
     args.workdir.mkdir(parents=True, exist_ok=True)
+    suffix = args.ocr_version if args.ocr_strategy == "full-page" else f"{args.ocr_version}-{args.ocr_strategy}"
     original_toc_path = args.workdir / "original-toc.json"
     stripped_pdf_path = args.workdir / "test-no-toc.pdf"
-    generated_pdf_path = args.workdir / f"generated-{args.ocr_version}.pdf"
-    generated_toc_path = args.workdir / f"generated-{args.ocr_version}-toc.json"
-    report_path = args.workdir / f"generated-{args.ocr_version}-report.json"
-    comparison_path = args.workdir / f"comparison-{args.ocr_version}.json"
-    summary_path = args.workdir / f"comparison-{args.ocr_version}.md"
+    generated_pdf_path = args.workdir / f"generated-{suffix}.pdf"
+    generated_toc_path = args.workdir / f"generated-{suffix}-toc.json"
+    report_path = args.workdir / f"generated-{suffix}-report.json"
+    comparison_path = args.workdir / f"comparison-{suffix}.json"
+    summary_path = args.workdir / f"comparison-{suffix}.md"
 
     original_toc = prepare_inputs(
         source=args.source,
@@ -59,6 +61,7 @@ def main() -> None:
             enable_ocr=True,
             enable_llm=False,
             ocr_backend=backend,
+            ocr_strategy=args.ocr_strategy,
         )
         if result.exit_code != 0:
             raise SystemExit(f"E2E run failed: {result.message}")
@@ -66,7 +69,7 @@ def main() -> None:
     generated_toc = json.loads(generated_toc_path.read_text(encoding="utf-8"))
     comparison = compare_tocs(original_toc, generated_toc)
     comparison_path.write_text(json.dumps(comparison, ensure_ascii=False, indent=2), encoding="utf-8")
-    summary_path.write_text(render_summary(comparison, args.ocr_version), encoding="utf-8")
+    summary_path.write_text(render_summary(comparison, suffix), encoding="utf-8")
     print(summary_path)
 
 

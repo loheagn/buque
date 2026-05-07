@@ -76,6 +76,20 @@ uv run buque add-bookmarks --enable-ocr --lang ch \
 
 For scanned PDFs that also contain a noisy hidden text layer, set `BUQUE_FORCE_OCR=1` to ignore extracted text and OCR every page. `BUQUE_OCR_RENDER_SCALE` can tune OCR image resolution; higher values are slower but may improve accuracy.
 
+For scanned books, OCR defaults to the `toc-guided` strategy: Buque scans forward to the table of contents, parses its page numbers, and OCRs only the referenced target pages plus small front/tail windows. If the guided path cannot build bookmarks, it automatically falls back to full-page OCR:
+
+```bash
+BUQUE_FORCE_OCR=1 \
+BUQUE_OCR_BACKEND=paddleocr \
+BUQUE_OCR_RENDER_SCALE=0.5 \
+BUQUE_TOC_GUIDED_TOC_RENDER_SCALE=2.0 \
+uv run buque add-bookmarks --enable-ocr --lang ch \
+  --input ./scan.pdf \
+  --output ./scan.bookmarked.pdf
+```
+
+Pass `--ocr-strategy full-page` to skip the guided path and OCR all routed pages immediately. `BUQUE_TOC_GUIDED_CONFIRM_WINDOW` widens target-page confirmation around each inferred page number when needed; the default is `0`.
+
 ## Current Scope
 
 M2 supports text-based PDFs directly. A PDF is treated as text-based when enough pages contain extractable text. Scanned PDFs and sparse pages in hybrid PDFs are processed through OCR when `--enable-ocr` is set and an OCR backend is configured; otherwise scanned and hybrid PDFs are rejected with exit code `2`.

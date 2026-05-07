@@ -74,6 +74,20 @@ uv run buque add-bookmarks --enable-ocr --lang ch \
 
 对于影印版但带有噪声隐藏文本层的 PDF，可设置 `BUQUE_FORCE_OCR=1` 忽略提取文本并对每页执行 OCR。`BUQUE_OCR_RENDER_SCALE` 可调整 OCR 渲染分辨率；数值越大通常越慢，但可能提升准确率。
 
+对于扫描书籍，OCR 默认使用 `toc-guided` 策略：先向前扫描到目录，解析目录页码，再只 OCR 目录指向的目标页以及少量前置/尾部窗口。如果 guided 路径无法生成书签，会自动回退到 full-page OCR：
+
+```bash
+BUQUE_FORCE_OCR=1 \
+BUQUE_OCR_BACKEND=paddleocr \
+BUQUE_OCR_RENDER_SCALE=0.5 \
+BUQUE_TOC_GUIDED_TOC_RENDER_SCALE=2.0 \
+uv run buque add-bookmarks --enable-ocr --lang ch \
+  --input ./scan.pdf \
+  --output ./scan.bookmarked.pdf
+```
+
+传入 `--ocr-strategy full-page` 可跳过 guided 路径，直接 OCR 所有路由页面。必要时可通过 `BUQUE_TOC_GUIDED_CONFIRM_WINDOW` 扩大每个推导页码附近的确认范围；默认值为 `0`。
+
 ## 当前范围
 
 M2 可直接处理文本型 PDF。当 PDF 中有足够多页面包含可提取文本时，会被视为文本型 PDF。扫描版 PDF 和混合版 PDF 中的稀疏文本页会在设置 `--enable-ocr` 且配置 OCR 后端后通过 OCR 处理；否则会以退出码 `2` 拒绝。

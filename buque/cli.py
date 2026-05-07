@@ -37,6 +37,11 @@ def add_bookmarks(
     ),
     lang: str = typer.Option("zh", "--lang", help="Language hint passed to the OCR backend."),
     enable_ocr: bool = typer.Option(False, "--enable-ocr", help="Enable OCR routing for scanned or hybrid PDFs."),
+    ocr_strategy: str | None = typer.Option(
+        None,
+        "--ocr-strategy",
+        help="OCR strategy: toc-guided or full-page. Defaults to toc-guided.",
+    ),
     enable_llm: bool = typer.Option(False, "--enable-llm", help="Reserved LLM switch for future stages."),
     report_path: Path = typer.Option(
         Path("report.json"),
@@ -74,6 +79,7 @@ def add_bookmarks(
         enable_ocr=enable_ocr,
         enable_llm=enable_llm,
         config_path=config_path,
+        ocr_strategy=ocr_strategy,
     )
     if result.success:
         typer.echo(result.message)

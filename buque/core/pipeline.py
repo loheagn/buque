@@ -14,6 +14,7 @@ from buque.core.config import RuleConfig, ScoreWeights, load_config
 from buque.core.extract_text import extract_text_lines
 from buque.core.models import CandidateHeading, TocNode
 from buque.core.ocr_extract import OCRExtractionResult, extract_ocr_candidates
+from buque.core.toc_guided import TocGuidedResult, extract_toc_guided_nodes
 from buque.core.tree_builder import build_toc_nodes
 from buque.core.writer import write_bookmarks
 from buque.ocr import CommandOCRBackend, NoopOCRBackend, OCRBackend, PaddleOCRBackend
@@ -39,8 +40,10 @@ def run_add_bookmarks(
     enable_llm: bool,
     config_path: Path | None = None,
     ocr_backend: OCRBackend | None = None,
+    ocr_strategy: str | None = None,
 ) -> PipelineResult:
-    report = _new_report(enable_ocr=enable_ocr, enable_llm=enable_llm)
+    resolved_ocr_strategy = _resolve_ocr_strategy(ocr_strategy)
+    report = _new_report(enable_ocr=enable_ocr, enable_llm=enable_llm, ocr_strategy=resolved_ocr_strategy)
     toc_nodes: list[TocNode] = []
 
     try:
@@ -104,6 +107,7 @@ def run_add_bookmarks(
                     score_weights=config.score_weights,
                 )
             candidates = list(text_candidates)
+            guided_toc_nodes: list[TocNode] | None = None
             rule_stats = {
                 **text_stats,
                 "threshold_high": config.thresholds.high,
@@ -118,34 +122,67 @@ def run_add_bookmarks(
                     force_ocr=force_ocr,
                 )
                 if ocr_page_indexes:
-                    ocr_result = extract_ocr_candidates(
-                        doc,
-                        page_indexes=ocr_page_indexes,
-                        backend=backend,
-                        lang=lang,
-                        rules=config.rules,
-                        score_weights=config.score_weights,
-                    )
-                    report["feature_flags"]["ocr_executed"] = True
-                    candidates.extend(ocr_result.candidates)
-                    rule_stats.update(ocr_result.stats)
-                    _add_ocr_errors(report, ocr_result)
+                    if resolved_ocr_strategy == "toc-guided":
+                        guided_result = extract_toc_guided_nodes(
+                            doc,
+                            backend=backend,
+                            lang=lang,
+                        )
+                        report["feature_flags"]["ocr_executed"] = True
+                        report["feature_flags"]["toc_guided_executed"] = True
+                        rule_stats.update(guided_result.stats)
+                        _add_toc_guided_errors(report, guided_result)
+                        if guided_result.toc_nodes:
+                            guided_toc_nodes = guided_result.toc_nodes
+                        elif not _env_bool("BUQUE_TOC_GUIDED_DISABLE_FALLBACK"):
+                            report["errors"].append("toc_guided_fallback_full_page")
+                            ocr_result = extract_ocr_candidates(
+                                doc,
+                                page_indexes=ocr_page_indexes,
+                                backend=backend,
+                                lang=lang,
+                                rules=config.rules,
+                                score_weights=config.score_weights,
+                            )
+                            candidates.extend(ocr_result.candidates)
+                            rule_stats.update(ocr_result.stats)
+                            _add_ocr_errors(report, ocr_result)
+                    else:
+                        ocr_result = extract_ocr_candidates(
+                            doc,
+                            page_indexes=ocr_page_indexes,
+                            backend=backend,
+                            lang=lang,
+                            rules=config.rules,
+                            score_weights=config.score_weights,
+                        )
+                        report["feature_flags"]["ocr_executed"] = True
+                        candidates.extend(ocr_result.candidates)
+                        rule_stats.update(ocr_result.stats)
+                        _add_ocr_errors(report, ocr_result)
 
-            report["candidate_count"] = len(candidates)
             report["rule_stats"] = rule_stats
 
-            accepted, rejected_low = _split_candidates(
-                candidates,
-                high_threshold=config.thresholds.high,
-            )
-            tree_result = build_toc_nodes(accepted, max_level_jump=config.thresholds.max_level_jump)
-            toc_nodes = tree_result.toc_nodes
+            if guided_toc_nodes is not None:
+                toc_nodes = guided_toc_nodes
+                report["candidate_count"] = len(toc_nodes)
+                report["accepted_count"] = len(toc_nodes)
+                report["rejected_nodes"] = []
+                report["rejected_count"] = 0
+            else:
+                report["candidate_count"] = len(candidates)
+                accepted, rejected_low = _split_candidates(
+                    candidates,
+                    high_threshold=config.thresholds.high,
+                )
+                tree_result = build_toc_nodes(accepted, max_level_jump=config.thresholds.max_level_jump)
+                toc_nodes = tree_result.toc_nodes
 
-            report["accepted_count"] = len(toc_nodes)
-            report["rejected_nodes"] = [*rejected_low, *tree_result.rejected_nodes]
-            report["rejected_count"] = len(report["rejected_nodes"])
+                report["accepted_count"] = len(toc_nodes)
+                report["rejected_nodes"] = [*rejected_low, *tree_result.rejected_nodes]
+                report["rejected_count"] = len(report["rejected_nodes"])
 
-            if classified.doc_type != "text" and not candidates:
+            if classified.doc_type != "text" and not candidates and guided_toc_nodes is None:
                 report["errors"].append("ocr_no_candidates")
                 return _finalize_result(
                     success=False,
@@ -264,6 +301,15 @@ def _add_ocr_errors(report: dict[str, Any], ocr_result: OCRExtractionResult) -> 
         report["errors"].append("ocr_backend_error")
 
 
+def _add_toc_guided_errors(report: dict[str, Any], guided_result: TocGuidedResult) -> None:
+    if not guided_result.errors:
+        return
+    report["toc_guided_errors"] = guided_result.errors
+    if any(error.get("reason") == "ocr_backend_error" for error in guided_result.errors):
+        if "ocr_backend_error" not in report["errors"]:
+            report["errors"].append("ocr_backend_error")
+
+
 def _empty_rule_stats() -> dict[str, float]:
     return {
         "avg_style_score": 0.0,
@@ -278,7 +324,7 @@ def _env_bool(name: str) -> bool:
     return os.environ.get(name, "").strip().lower() in {"1", "true", "yes", "on"}
 
 
-def _new_report(*, enable_ocr: bool, enable_llm: bool) -> dict[str, Any]:
+def _new_report(*, enable_ocr: bool, enable_llm: bool, ocr_strategy: str) -> dict[str, Any]:
     return {
         "doc_type": None,
         "page_count": 0,
@@ -293,10 +339,18 @@ def _new_report(*, enable_ocr: bool, enable_llm: bool) -> dict[str, Any]:
             "enable_ocr": enable_ocr,
             "enable_llm": enable_llm,
             "ocr_executed": False,
+            "ocr_strategy": ocr_strategy,
+            "toc_guided_executed": False,
             "llm_executed": False,
         },
         "rejected_nodes": [],
     }
+
+
+def _resolve_ocr_strategy(value: str | None) -> str:
+    raw_value = (value or os.environ.get("BUQUE_OCR_STRATEGY", "") or "toc-guided").strip().lower()
+    normalized = raw_value.replace("_", "-")
+    return normalized if normalized in {"full-page", "toc-guided"} else "toc-guided"
 
 
 def _finalize_error(

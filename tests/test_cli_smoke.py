@@ -60,6 +60,21 @@ class _StaticOCRBackend:
         return self.lines
 
 
+class _SequencedOCRBackend:
+    def __init__(self, pages: list[list[OCRLine]]) -> None:
+        self.pages = pages
+        self.calls = 0
+
+    def extract(self, *, page_image_bytes: bytes, lang: str) -> list[OCRLine]:
+        assert page_image_bytes
+        assert lang
+        index = self.calls
+        self.calls += 1
+        if index >= len(self.pages):
+            return []
+        return self.pages[index]
+
+
 def test_cli_add_bookmarks_smoke(tmp_path: Path) -> None:
     input_pdf = tmp_path / "book.pdf"
     output_pdf = tmp_path / "book.tagged.pdf"
@@ -158,6 +173,7 @@ def test_pipeline_processes_scanned_document_with_ocr_backend(tmp_path: Path) ->
         enable_ocr=True,
         enable_llm=False,
         ocr_backend=ocr_backend,
+        ocr_strategy="full-page",
     )
 
     assert result.exit_code == 0
@@ -193,6 +209,7 @@ def test_pipeline_routes_only_sparse_pages_for_hybrid_ocr(tmp_path: Path) -> Non
         enable_ocr=True,
         enable_llm=False,
         ocr_backend=ocr_backend,
+        ocr_strategy="full-page",
     )
 
     assert result.exit_code == 0
@@ -204,3 +221,88 @@ def test_pipeline_routes_only_sparse_pages_for_hybrid_ocr(tmp_path: Path) -> Non
     assert report["doc_type"] == "hybrid"
     assert report["text_pages"] == 1
     assert report["rule_stats"]["ocr_pages_attempted"] == 1
+
+
+def test_pipeline_can_use_toc_guided_ocr_strategy(tmp_path: Path, monkeypatch) -> None:
+    input_pdf = tmp_path / "scan.pdf"
+    output_pdf = tmp_path / "scan.tagged.pdf"
+    report_path = tmp_path / "report.json"
+    toc_path = tmp_path / "toc.json"
+    _build_scanned_like_pdf(input_pdf)
+    with fitz.open(input_pdf) as doc:
+        doc.new_page()
+        doc.new_page()
+        doc.saveIncr()
+
+    monkeypatch.setenv("BUQUE_TOC_GUIDED_TARGET_RENDER_SCALE", "2")
+    ocr_backend = _SequencedOCRBackend(
+        [
+            [],
+            [
+                OCRTextLine("目录", bbox=(260, 140, 340, 190), confidence=0.99),
+                OCRTextLine("绪论测试", bbox=(180, 320, 340, 350), confidence=0.99),
+                OCRTextLine("1", bbox=(920, 320, 940, 350), confidence=0.99),
+            ],
+            [
+                OCRTextLine("绪论测试", bbox=(220, 180, 380, 230), confidence=0.99),
+            ],
+        ]
+    )
+
+    result = run_add_bookmarks(
+        input_path=input_pdf,
+        output_path=output_pdf,
+        report_path=report_path,
+        toc_json_path=toc_path,
+        lang="zh",
+        enable_ocr=True,
+        enable_llm=False,
+        ocr_backend=ocr_backend,
+    )
+
+    assert result.exit_code == 0
+    toc_payload = json.loads(toc_path.read_text(encoding="utf-8"))
+    assert [node["title"] for node in toc_payload] == ["目录", "绪论测试"]
+    assert [node["page_index"] for node in toc_payload] == [1, 2]
+
+    report = json.loads(report_path.read_text(encoding="utf-8"))
+    assert report["feature_flags"]["ocr_strategy"] == "toc-guided"
+    assert report["feature_flags"]["toc_guided_executed"] is True
+    assert report["rule_stats"]["toc_guided_page_offset"] == 2
+
+
+def test_pipeline_default_toc_guided_falls_back_to_full_page(tmp_path: Path) -> None:
+    input_pdf = tmp_path / "scan.pdf"
+    output_pdf = tmp_path / "scan.tagged.pdf"
+    report_path = tmp_path / "report.json"
+    toc_path = tmp_path / "toc.json"
+    _build_scanned_like_pdf(input_pdf)
+    ocr_backend = _SequencedOCRBackend(
+        [
+            [],
+            [
+                OCRTextLine("Chapter 1 OCR", bbox=(80, 80, 420, 200), confidence=0.98),
+            ],
+        ]
+    )
+
+    result = run_add_bookmarks(
+        input_path=input_pdf,
+        output_path=output_pdf,
+        report_path=report_path,
+        toc_json_path=toc_path,
+        lang="eng",
+        enable_ocr=True,
+        enable_llm=False,
+        ocr_backend=ocr_backend,
+    )
+
+    assert result.exit_code == 0
+    assert ocr_backend.calls == 2
+    toc_payload = json.loads(toc_path.read_text(encoding="utf-8"))
+    assert [node["title"] for node in toc_payload] == ["Chapter 1 OCR"]
+
+    report = json.loads(report_path.read_text(encoding="utf-8"))
+    assert report["feature_flags"]["ocr_strategy"] == "toc-guided"
+    assert report["feature_flags"]["toc_guided_executed"] is True
+    assert "toc_guided_fallback_full_page" in report["errors"]
