@@ -1,44 +1,8 @@
-# Python bytecode and build artifacts
-__pycache__/
-*.py[oc]
-*$py.class
-build/
-dist/
-wheels/
-*.egg-info
-
-# Test, coverage, and tool caches
-.pytest_cache/
-.coverage
-.coverage.*
-htmlcov/
-.tox/
-.nox/
-.ruff_cache/
-.mypy_cache/
-.pyre/
-
-# Virtual environments and local env files
-.venv/
-venv/
-env/
-ENV/
-.env
-.env.*
-!.env.example
-
-# Local editor and OS files
 .DS_Store
-.idea/
-.vscode/
-*.swp
-*.swo
-
-# Buque CLI generated outputs
-report.json
-toc.json
-*.tagged.pdf
-*.out.pdf
-
-# Local planning/design drafts
-pdf-tagging-tool-tech-design.md
+node_modules/
+dist/
+coverage/
+.vitest/
+test/tmp-*/
+scratch-*/
+e2e-output/
