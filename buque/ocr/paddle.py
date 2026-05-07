@@ -28,6 +28,11 @@ class PaddleOCRBackend:
 
         self.ocr_version = ocr_version
         self.lang = lang
+        self.text_detection_model_name = text_detection_model_name
+        self.text_recognition_model_name = text_recognition_model_name
+        self.use_doc_orientation_classify = use_doc_orientation_classify
+        self.use_doc_unwarping = use_doc_unwarping
+        self.use_textline_orientation = use_textline_orientation
         self._ocr = PaddleOCR(
             lang=lang,
             ocr_version=ocr_version,

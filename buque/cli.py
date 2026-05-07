@@ -42,6 +42,12 @@ def add_bookmarks(
         "--ocr-strategy",
         help="OCR strategy: toc-guided or full-page. Defaults to toc-guided.",
     ),
+    ocr_parallelism: int = typer.Option(
+        1,
+        "--ocr-parallelism",
+        min=1,
+        help="Maximum OCR worker processes. 1 keeps OCR serial.",
+    ),
     enable_llm: bool = typer.Option(False, "--enable-llm", help="Reserved LLM switch for future stages."),
     report_path: Path = typer.Option(
         Path("report.json"),
@@ -80,6 +86,7 @@ def add_bookmarks(
         enable_llm=enable_llm,
         config_path=config_path,
         ocr_strategy=ocr_strategy,
+        ocr_parallelism=ocr_parallelism,
     )
     if result.success:
         typer.echo(result.message)

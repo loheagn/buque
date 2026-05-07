@@ -11,10 +11,9 @@ import fitz
 from buque.core.models import TocNode
 from buque.core.ocr_extract import (
     _OCRLine,
-    _coerce_ocr_lines,
     _expand_heading_fragments,
-    _render_page_png,
     _render_scale,
+    run_ocr_pages,
 )
 from buque.core.scorer import normalize_title
 from buque.ocr import OCRBackend
@@ -42,7 +41,7 @@ _FRONT_TITLES = {
 @dataclass(slots=True)
 class TocGuidedResult:
     toc_nodes: list[TocNode]
-    stats: dict[str, float]
+    stats: dict[str, object]
     errors: list[dict[str, object]]
 
 
@@ -64,16 +63,20 @@ class _Match:
 
 
 class _OCRPageCache:
-    def __init__(self, *, doc: fitz.Document, backend: OCRBackend, lang: str) -> None:
+    def __init__(self, *, doc: fitz.Document, backend: OCRBackend, lang: str, ocr_parallelism: int) -> None:
         self._doc = doc
         self._backend = backend
         self._lang = lang
+        self._ocr_parallelism = max(1, ocr_parallelism)
         self._cache: dict[tuple[int, float], list[_OCRLine]] = {}
         self.errors: list[dict[str, object]] = []
         self.calls = 0
         self.unique_pages: set[int] = set()
-        self.pages_with_text: set[int] = set()
+        self.pages_with_text = 0
         self.line_count = 0
+        self.parallelism_effective = 1
+        self.parallel_mode = "serial"
+        self.parallel_fallback_to_serial = False
 
     def get(self, page_index: int, *, render_scale: float) -> list[_OCRLine]:
         if page_index < 0 or page_index >= self._doc.page_count:
@@ -82,37 +85,52 @@ class _OCRPageCache:
         if key in self._cache:
             return self._cache[key]
 
-        self.calls += 1
-        self.unique_pages.add(page_index)
-        page = self._doc[page_index]
-        if _env_bool("BUQUE_OCR_PROGRESS"):
-            print(f"OCR page {page_index + 1}/{self._doc.page_count}", flush=True)
-        try:
-            raw_lines = self._backend.extract(
-                page_image_bytes=_render_page_png(page, render_scale=render_scale),
-                lang=self._lang,
-            )
-        except Exception as exc:  # pragma: no cover - backend-specific failures are reported.
-            self.errors.append(
-                {
-                    "page_index": page_index,
-                    "reason": "ocr_backend_error",
-                    "detail": str(exc),
-                }
-            )
-            self._cache[key] = []
-            return []
+        self._load_pages([page_index], render_scale=render_scale, ocr_parallelism=1)
+        return self._cache.get(key, [])
 
-        lines = _coerce_ocr_lines(
-            raw_lines,
-            page_height=float(page.rect.height),
+    def prefetch(self, page_indexes: Iterable[int], *, render_scale: float) -> None:
+        self._load_pages(page_indexes, render_scale=render_scale, ocr_parallelism=self._ocr_parallelism)
+
+    def _load_pages(
+        self,
+        page_indexes: Iterable[int],
+        *,
+        render_scale: float,
+        ocr_parallelism: int,
+    ) -> None:
+        seen: set[int] = set()
+        indexes: list[int] = []
+        for page_index in page_indexes:
+            if page_index in seen or page_index < 0 or page_index >= self._doc.page_count:
+                continue
+            seen.add(page_index)
+            if (page_index, render_scale) not in self._cache:
+                indexes.append(page_index)
+        if not indexes:
+            return
+        page_run = run_ocr_pages(
+            self._doc,
+            page_indexes=indexes,
+            backend=self._backend,
+            lang=self._lang,
             render_scale=render_scale,
+            ocr_parallelism=ocr_parallelism,
         )
-        self.line_count += len(lines)
-        if lines:
-            self.pages_with_text.add(page_index)
-        self._cache[key] = lines
-        return lines
+        for page_index in indexes:
+            self._cache[(page_index, render_scale)] = page_run.page_lines.get(page_index, [])
+        self.errors.extend(page_run.errors)
+        self.calls += int(page_run.stats.get("ocr_pages_attempted", 0.0))
+        self.unique_pages.update(indexes)
+        self.pages_with_text += int(page_run.stats.get("ocr_pages_with_text", 0.0))
+        self.line_count += int(page_run.stats.get("ocr_line_count", 0.0))
+        self.parallelism_effective = max(
+            self.parallelism_effective,
+            int(page_run.stats.get("ocr_parallelism_effective", 1.0)),
+        )
+        if page_run.stats.get("ocr_parallel_mode") == "process":
+            self.parallel_mode = "process"
+        if page_run.stats.get("ocr_parallel_fallback_to_serial", 0.0):
+            self.parallel_fallback_to_serial = True
 
 
 def extract_toc_guided_nodes(
@@ -120,6 +138,7 @@ def extract_toc_guided_nodes(
     *,
     backend: OCRBackend,
     lang: str,
+    ocr_parallelism: int = 1,
 ) -> TocGuidedResult:
     toc_scale = _env_float("BUQUE_TOC_GUIDED_TOC_RENDER_SCALE", 2.0)
     target_scale = _env_float("BUQUE_TOC_GUIDED_TARGET_RENDER_SCALE", _render_scale())
@@ -128,7 +147,7 @@ def extract_toc_guided_nodes(
     confirm_window = _env_int("BUQUE_TOC_GUIDED_CONFIRM_WINDOW", 0)
     tail_scan_pages = _env_int("BUQUE_TOC_GUIDED_TAIL_SCAN_PAGES", 8)
 
-    cache = _OCRPageCache(doc=doc, backend=backend, lang=lang)
+    cache = _OCRPageCache(doc=doc, backend=backend, lang=lang, ocr_parallelism=ocr_parallelism)
     toc_start: int | None = None
     toc_content_end: int | None = None
     toc_scan_end: int | None = None
@@ -167,10 +186,10 @@ def extract_toc_guided_nodes(
             toc_scan_end = page_index - 1
             break
 
-    errors: list[dict[str, object]] = [*cache.errors]
+    errors: list[dict[str, object]] = []
     if toc_start is None or toc_content_end is None:
         errors.append({"reason": "toc_guided_toc_not_found"})
-        return _result([], cache=cache, errors=errors, extra_stats={})
+        return _result([], cache=cache, errors=[*cache.errors, *errors], extra_stats={})
 
     structural_entries = _assign_missing_printed_pages(_select_structural_entries(parsed_rows))
     if not structural_entries:
@@ -178,7 +197,7 @@ def extract_toc_guided_nodes(
         return _result(
             [],
             cache=cache,
-            errors=errors,
+            errors=[*cache.errors, *errors],
             extra_stats={"toc_guided_toc_pages": float(toc_content_end - toc_start + 1)},
         )
 
@@ -200,7 +219,10 @@ def extract_toc_guided_nodes(
         if first_content_index is not None
         else min(doc.page_count, (toc_scan_end or toc_content_end) + 1 + offset_probe_pages)
     )
-    for page_index in range((toc_scan_end if toc_scan_end is not None else toc_content_end) + 1, min(preface_end, doc.page_count)):
+    preface_start = (toc_scan_end if toc_scan_end is not None else toc_content_end) + 1
+    preface_stop = min(preface_end, doc.page_count)
+    cache.prefetch(range(preface_start, preface_stop), render_scale=target_scale)
+    for page_index in range(preface_start, preface_stop):
         lines = cache.get(page_index, render_scale=target_scale)
         front_nodes.extend(_front_nodes_from_page(lines, page_index=page_index))
 
@@ -217,6 +239,7 @@ def extract_toc_guided_nodes(
     if main_nodes:
         tail_start = main_nodes[-1].page_index
         tail_stop = min(doc.page_count, tail_start + tail_scan_pages + 1)
+        cache.prefetch(range(tail_start, tail_stop), render_scale=target_scale)
         for page_index in range(tail_start, tail_stop):
             lines = cache.get(page_index, render_scale=target_scale)
             tail_nodes.extend(_tail_nodes_from_page(lines, page_index=page_index, page=doc[page_index]))
@@ -225,7 +248,7 @@ def extract_toc_guided_nodes(
     return _result(
         toc_nodes,
         cache=cache,
-        errors=errors,
+        errors=[*cache.errors, *errors],
         extra_stats={
             "toc_guided_toc_start_page": float(toc_start + 1),
             "toc_guided_toc_pages": float(toc_content_end - toc_start + 1),
@@ -413,6 +436,8 @@ def _entries_to_nodes(
     confirm_window: int,
 ) -> list[TocNode]:
     nodes: list[TocNode] = []
+    entry_indexes: list[tuple[_TocEntry, list[int]]] = []
+    all_candidate_indexes: list[int] = []
     for entry in entries:
         if entry.printed_page is None:
             continue
@@ -422,6 +447,12 @@ def _entries_to_nodes(
             for page_index in range(predicted_index - confirm_window, predicted_index + confirm_window + 1)
             if 0 <= page_index < doc.page_count
         ]
+        entry_indexes.append((entry, candidate_indexes))
+        all_candidate_indexes.extend(candidate_indexes)
+    cache.prefetch(all_candidate_indexes, render_scale=render_scale)
+
+    for entry, candidate_indexes in entry_indexes:
+        predicted_index = int(entry.printed_page or 1) + offset - 1
         best_match = _Match(similarity=0.0, title="", page_index=max(0, min(doc.page_count - 1, predicted_index)))
         best_score = -1.0
         for page_index in candidate_indexes:
@@ -560,8 +591,12 @@ def _result(
     stats = {
         "ocr_pages_attempted": float(cache.calls),
         "ocr_unique_pages_attempted": float(len(cache.unique_pages)),
-        "ocr_pages_with_text": float(len(cache.pages_with_text)),
+        "ocr_pages_with_text": float(cache.pages_with_text),
         "ocr_line_count": float(cache.line_count),
+        "ocr_parallelism_requested": float(cache._ocr_parallelism),
+        "ocr_parallelism_effective": float(cache.parallelism_effective),
+        "ocr_parallel_mode": cache.parallel_mode,
+        "ocr_parallel_fallback_to_serial": float(cache.parallel_fallback_to_serial),
         "ocr_candidate_count": float(len(toc_nodes)),
         "toc_guided_node_count": float(len(toc_nodes)),
     }

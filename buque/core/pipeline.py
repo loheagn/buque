@@ -41,9 +41,16 @@ def run_add_bookmarks(
     config_path: Path | None = None,
     ocr_backend: OCRBackend | None = None,
     ocr_strategy: str | None = None,
+    ocr_parallelism: int = 1,
 ) -> PipelineResult:
     resolved_ocr_strategy = _resolve_ocr_strategy(ocr_strategy)
-    report = _new_report(enable_ocr=enable_ocr, enable_llm=enable_llm, ocr_strategy=resolved_ocr_strategy)
+    resolved_ocr_parallelism = _resolve_ocr_parallelism(ocr_parallelism)
+    report = _new_report(
+        enable_ocr=enable_ocr,
+        enable_llm=enable_llm,
+        ocr_strategy=resolved_ocr_strategy,
+        ocr_parallelism=resolved_ocr_parallelism,
+    )
     toc_nodes: list[TocNode] = []
 
     try:
@@ -127,10 +134,12 @@ def run_add_bookmarks(
                             doc,
                             backend=backend,
                             lang=lang,
+                            ocr_parallelism=resolved_ocr_parallelism,
                         )
                         report["feature_flags"]["ocr_executed"] = True
                         report["feature_flags"]["toc_guided_executed"] = True
                         rule_stats.update(guided_result.stats)
+                        _update_ocr_parallel_report(report, guided_result.stats)
                         _add_toc_guided_errors(report, guided_result)
                         if guided_result.toc_nodes:
                             guided_toc_nodes = guided_result.toc_nodes
@@ -143,9 +152,11 @@ def run_add_bookmarks(
                                 lang=lang,
                                 rules=config.rules,
                                 score_weights=config.score_weights,
+                                ocr_parallelism=resolved_ocr_parallelism,
                             )
                             candidates.extend(ocr_result.candidates)
                             rule_stats.update(ocr_result.stats)
+                            _update_ocr_parallel_report(report, ocr_result.stats)
                             _add_ocr_errors(report, ocr_result)
                     else:
                         ocr_result = extract_ocr_candidates(
@@ -155,10 +166,12 @@ def run_add_bookmarks(
                             lang=lang,
                             rules=config.rules,
                             score_weights=config.score_weights,
+                            ocr_parallelism=resolved_ocr_parallelism,
                         )
                         report["feature_flags"]["ocr_executed"] = True
                         candidates.extend(ocr_result.candidates)
                         rule_stats.update(ocr_result.stats)
+                        _update_ocr_parallel_report(report, ocr_result.stats)
                         _add_ocr_errors(report, ocr_result)
 
             report["rule_stats"] = rule_stats
@@ -324,7 +337,7 @@ def _env_bool(name: str) -> bool:
     return os.environ.get(name, "").strip().lower() in {"1", "true", "yes", "on"}
 
 
-def _new_report(*, enable_ocr: bool, enable_llm: bool, ocr_strategy: str) -> dict[str, Any]:
+def _new_report(*, enable_ocr: bool, enable_llm: bool, ocr_strategy: str, ocr_parallelism: int) -> dict[str, Any]:
     return {
         "doc_type": None,
         "page_count": 0,
@@ -340,6 +353,9 @@ def _new_report(*, enable_ocr: bool, enable_llm: bool, ocr_strategy: str) -> dic
             "enable_llm": enable_llm,
             "ocr_executed": False,
             "ocr_strategy": ocr_strategy,
+            "ocr_parallelism_requested": ocr_parallelism,
+            "ocr_parallelism_effective": 1,
+            "ocr_parallel_mode": "serial",
             "toc_guided_executed": False,
             "llm_executed": False,
         },
@@ -351,6 +367,23 @@ def _resolve_ocr_strategy(value: str | None) -> str:
     raw_value = (value or os.environ.get("BUQUE_OCR_STRATEGY", "") or "toc-guided").strip().lower()
     normalized = raw_value.replace("_", "-")
     return normalized if normalized in {"full-page", "toc-guided"} else "toc-guided"
+
+
+def _resolve_ocr_parallelism(value: int) -> int:
+    try:
+        return max(1, int(value))
+    except (TypeError, ValueError):
+        return 1
+
+
+def _update_ocr_parallel_report(report: dict[str, Any], stats: dict[str, object]) -> None:
+    feature_flags = report["feature_flags"]
+    if "ocr_parallelism_requested" in stats:
+        feature_flags["ocr_parallelism_requested"] = int(float(stats["ocr_parallelism_requested"]))
+    if "ocr_parallelism_effective" in stats:
+        feature_flags["ocr_parallelism_effective"] = int(float(stats["ocr_parallelism_effective"]))
+    if "ocr_parallel_mode" in stats:
+        feature_flags["ocr_parallel_mode"] = str(stats["ocr_parallel_mode"])
 
 
 def _finalize_error(

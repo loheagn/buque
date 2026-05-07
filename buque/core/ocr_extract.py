@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from concurrent.futures import FIRST_COMPLETED, Future, ProcessPoolExecutor, wait
+from concurrent.futures.process import BrokenProcessPool
 from dataclasses import dataclass
 import os
 import re
@@ -19,8 +21,11 @@ from buque.core.scorer import (
     total_score,
 )
 from buque.ocr import OCRBackend, OCRLine, OCRTextLine
+from buque.ocr.spec import OCRBackendSpec, backend_from_spec, backend_to_spec
 
 _DEFAULT_RENDER_SCALE = 2.0
+_MAX_IN_FLIGHT_PER_WORKER = 2
+_WORKER_BACKEND: OCRBackend | None = None
 _CHINESE_VOLUME_TITLE_RE = re.compile(r"^\s*第[零一二三四五六七八九十百千万〇\d]+卷")
 _CHINESE_CHAPTER_TITLE_RE = re.compile(r"^\s*第[零一二三四五六七八九十百千万〇\d]+章")
 _HEADING_PREFIX_RE = re.compile(
@@ -31,7 +36,14 @@ _HEADING_PREFIX_RE = re.compile(
 @dataclass(slots=True)
 class OCRExtractionResult:
     candidates: list[CandidateHeading]
-    stats: dict[str, float]
+    stats: dict[str, object]
+    errors: list[dict[str, object]]
+
+
+@dataclass(slots=True)
+class OCRPageRunResult:
+    page_lines: dict[int, list["_OCRLine"]]
+    stats: dict[str, object]
     errors: list[dict[str, object]]
 
 
@@ -60,44 +72,18 @@ def extract_ocr_candidates(
     lang: str,
     rules: RuleConfig,
     score_weights: ScoreWeights,
+    ocr_parallelism: int = 1,
 ) -> OCRExtractionResult:
     candidates: list[CandidateHeading] = []
-    errors: list[dict[str, object]] = []
-    pages_attempted = 0
-    pages_with_text = 0
-    line_count = 0
-    page_line_map: dict[int, list[_OCRLine]] = {}
-
-    for page_index in page_indexes:
-        if page_index < 0 or page_index >= doc.page_count:
-            continue
-        pages_attempted += 1
-        page = doc[page_index]
-        if _env_bool("BUQUE_OCR_PROGRESS"):
-            print(f"OCR page {page_index + 1}/{doc.page_count}", flush=True)
-        render_scale = _render_scale()
-        page_image_bytes = _render_page_png(page, render_scale=render_scale)
-        try:
-            ocr_lines = backend.extract(page_image_bytes=page_image_bytes, lang=lang)
-        except Exception as exc:  # pragma: no cover - backend-specific failures are reported.
-            errors.append(
-                {
-                    "page_index": page_index,
-                    "reason": "ocr_backend_error",
-                    "detail": str(exc),
-                }
-            )
-            continue
-
-        normalized_lines = _coerce_ocr_lines(
-            ocr_lines,
-            page_height=float(page.rect.height),
-            render_scale=render_scale,
-        )
-        if normalized_lines:
-            pages_with_text += 1
-            page_line_map[page_index] = normalized_lines
-        line_count += len(normalized_lines)
+    page_run = run_ocr_pages(
+        doc,
+        page_indexes=page_indexes,
+        backend=backend,
+        lang=lang,
+        render_scale=_render_scale(),
+        ocr_parallelism=ocr_parallelism,
+    )
+    page_line_map = page_run.page_lines
 
     body_line_height = _estimate_body_line_height(
         line
@@ -121,13 +107,268 @@ def extract_ocr_candidates(
     return OCRExtractionResult(
         candidates=candidates,
         stats={
-            "ocr_pages_attempted": float(pages_attempted),
-            "ocr_pages_with_text": float(pages_with_text),
-            "ocr_line_count": float(line_count),
+            **page_run.stats,
             "ocr_candidate_count": float(len(candidates)),
         },
+        errors=page_run.errors,
+    )
+
+
+def run_ocr_pages(
+    doc: fitz.Document,
+    *,
+    page_indexes: Iterable[int],
+    backend: OCRBackend,
+    lang: str,
+    render_scale: float,
+    ocr_parallelism: int = 1,
+) -> OCRPageRunResult:
+    normalized_parallelism = _normalize_parallelism(ocr_parallelism)
+    indexes = _valid_unique_page_indexes(page_indexes, page_count=doc.page_count)
+    backend_spec = backend_to_spec(backend)
+    if normalized_parallelism <= 1 or backend_spec is None or len(indexes) <= 1:
+        fallback_to_serial = normalized_parallelism > 1 and backend_spec is None
+        return _run_ocr_pages_serial(
+            doc,
+            page_indexes=indexes,
+            backend=backend,
+            lang=lang,
+            render_scale=render_scale,
+            requested_parallelism=normalized_parallelism,
+            fallback_to_serial=fallback_to_serial,
+        )
+
+    effective_parallelism = min(normalized_parallelism, len(indexes))
+    try:
+        return _run_ocr_pages_process(
+            doc,
+            page_indexes=indexes,
+            backend_spec=backend_spec,
+            lang=lang,
+            render_scale=render_scale,
+            requested_parallelism=normalized_parallelism,
+            effective_parallelism=effective_parallelism,
+        )
+    except Exception:
+        return _run_ocr_pages_serial(
+            doc,
+            page_indexes=indexes,
+            backend=backend,
+            lang=lang,
+            render_scale=render_scale,
+            requested_parallelism=normalized_parallelism,
+            fallback_to_serial=True,
+        )
+
+
+def _run_ocr_pages_serial(
+    doc: fitz.Document,
+    *,
+    page_indexes: list[int],
+    backend: OCRBackend,
+    lang: str,
+    render_scale: float,
+    requested_parallelism: int,
+    fallback_to_serial: bool = False,
+) -> OCRPageRunResult:
+    page_line_map: dict[int, list[_OCRLine]] = {}
+    errors: list[dict[str, object]] = []
+    line_count = 0
+    pages_with_text = 0
+    for page_index in page_indexes:
+        page = doc[page_index]
+        if _env_bool("BUQUE_OCR_PROGRESS"):
+            print(f"OCR page {page_index + 1}/{doc.page_count}", flush=True)
+        try:
+            ocr_lines = backend.extract(
+                page_image_bytes=_render_page_png(page, render_scale=render_scale),
+                lang=lang,
+            )
+        except Exception as exc:  # pragma: no cover - backend-specific failures are reported.
+            errors.append(_ocr_page_error(page_index, exc))
+            page_line_map[page_index] = []
+            continue
+
+        normalized_lines = _coerce_ocr_lines(
+            ocr_lines,
+            page_height=float(page.rect.height),
+            render_scale=render_scale,
+        )
+        if normalized_lines:
+            pages_with_text += 1
+        line_count += len(normalized_lines)
+        page_line_map[page_index] = normalized_lines
+
+    return OCRPageRunResult(
+        page_lines={page_index: page_line_map[page_index] for page_index in sorted(page_line_map)},
+        stats=_ocr_page_run_stats(
+            pages_attempted=len(page_indexes),
+            pages_with_text=pages_with_text,
+            line_count=line_count,
+            requested_parallelism=requested_parallelism,
+            effective_parallelism=1,
+            mode="serial",
+            fallback_to_serial=fallback_to_serial,
+        ),
         errors=errors,
     )
+
+
+def _run_ocr_pages_process(
+    doc: fitz.Document,
+    *,
+    page_indexes: list[int],
+    backend_spec: OCRBackendSpec,
+    lang: str,
+    render_scale: float,
+    requested_parallelism: int,
+    effective_parallelism: int,
+) -> OCRPageRunResult:
+    page_line_map: dict[int, list[_OCRLine]] = {}
+    errors: list[dict[str, object]] = []
+    line_count = 0
+    pages_with_text = 0
+    page_heights: dict[int, float] = {}
+    max_in_flight = max(1, effective_parallelism * _MAX_IN_FLIGHT_PER_WORKER)
+    pending: dict[Future[tuple[int, list[OCRLine], dict[str, object] | None]], int] = {}
+    page_iter = iter(page_indexes)
+
+    with ProcessPoolExecutor(
+        max_workers=effective_parallelism,
+        initializer=_init_ocr_worker,
+        initargs=(backend_spec,),
+    ) as executor:
+
+        def submit_next() -> bool:
+            try:
+                page_index = next(page_iter)
+            except StopIteration:
+                return False
+            page = doc[page_index]
+            page_heights[page_index] = float(page.rect.height)
+            if _env_bool("BUQUE_OCR_PROGRESS"):
+                print(f"OCR page {page_index + 1}/{doc.page_count}", flush=True)
+            future = executor.submit(
+                _extract_ocr_page_in_worker,
+                page_index,
+                _render_page_png(page, render_scale=render_scale),
+                lang,
+            )
+            pending[future] = page_index
+            return True
+
+        while len(pending) < max_in_flight and submit_next():
+            pass
+
+        while pending:
+            done, _pending = wait(pending, return_when=FIRST_COMPLETED)
+            for future in done:
+                page_index = pending.pop(future)
+                try:
+                    result_page_index, ocr_lines, error = future.result()
+                except BrokenProcessPool:
+                    raise
+                except Exception as exc:  # pragma: no cover - process failures are backend/runtime specific.
+                    errors.append(_ocr_page_error(page_index, exc))
+                    page_line_map[page_index] = []
+                    continue
+
+                if error is not None:
+                    errors.append(error)
+                    page_line_map[result_page_index] = []
+                    continue
+
+                normalized_lines = _coerce_ocr_lines(
+                    ocr_lines,
+                    page_height=page_heights[result_page_index],
+                    render_scale=render_scale,
+                )
+                if normalized_lines:
+                    pages_with_text += 1
+                line_count += len(normalized_lines)
+                page_line_map[result_page_index] = normalized_lines
+
+            while len(pending) < max_in_flight and submit_next():
+                pass
+
+    return OCRPageRunResult(
+        page_lines={page_index: page_line_map[page_index] for page_index in sorted(page_line_map)},
+        stats=_ocr_page_run_stats(
+            pages_attempted=len(page_indexes),
+            pages_with_text=pages_with_text,
+            line_count=line_count,
+            requested_parallelism=requested_parallelism,
+            effective_parallelism=effective_parallelism,
+            mode="process",
+            fallback_to_serial=False,
+        ),
+        errors=errors,
+    )
+
+
+def _init_ocr_worker(backend_spec: OCRBackendSpec) -> None:
+    global _WORKER_BACKEND
+    _WORKER_BACKEND = backend_from_spec(backend_spec)
+
+
+def _extract_ocr_page_in_worker(
+    page_index: int,
+    page_image_bytes: bytes,
+    lang: str,
+) -> tuple[int, list[OCRLine], dict[str, object] | None]:
+    if _WORKER_BACKEND is None:
+        return page_index, [], {"page_index": page_index, "reason": "ocr_backend_error", "detail": "OCR worker is not initialized."}
+    try:
+        return page_index, _WORKER_BACKEND.extract(page_image_bytes=page_image_bytes, lang=lang), None
+    except Exception as exc:  # pragma: no cover - backend-specific failures are reported.
+        return page_index, [], _ocr_page_error(page_index, exc)
+
+
+def _valid_unique_page_indexes(page_indexes: Iterable[int], *, page_count: int) -> list[int]:
+    seen: set[int] = set()
+    indexes: list[int] = []
+    for page_index in page_indexes:
+        if page_index < 0 or page_index >= page_count or page_index in seen:
+            continue
+        seen.add(page_index)
+        indexes.append(page_index)
+    return indexes
+
+
+def _normalize_parallelism(value: int) -> int:
+    try:
+        return max(1, int(value))
+    except (TypeError, ValueError):
+        return 1
+
+
+def _ocr_page_run_stats(
+    *,
+    pages_attempted: int,
+    pages_with_text: int,
+    line_count: int,
+    requested_parallelism: int,
+    effective_parallelism: int,
+    mode: str,
+    fallback_to_serial: bool,
+) -> dict[str, object]:
+    return {
+        "ocr_pages_attempted": float(pages_attempted),
+        "ocr_pages_with_text": float(pages_with_text),
+        "ocr_line_count": float(line_count),
+        "ocr_parallelism_requested": float(requested_parallelism),
+        "ocr_parallelism_effective": float(effective_parallelism),
+        "ocr_parallel_mode": mode,
+        "ocr_parallel_fallback_to_serial": float(fallback_to_serial),
+    }
+
+
+def _ocr_page_error(page_index: int, exc: Exception) -> dict[str, object]:
+    return {
+        "page_index": page_index,
+        "reason": "ocr_backend_error",
+        "detail": str(exc),
+    }
 
 
 def _render_scale() -> float:

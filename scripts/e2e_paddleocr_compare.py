@@ -30,6 +30,7 @@ def main() -> None:
     parser.add_argument("--workdir", type=Path, default=Path("artifacts/e2e-paddleocr"))
     parser.add_argument("--ocr-version", default="PP-OCRv5")
     parser.add_argument("--ocr-strategy", default="toc-guided", choices=["full-page", "toc-guided"])
+    parser.add_argument("--ocr-parallelism", type=int, default=1)
     parser.add_argument("--lang", default="ch")
     parser.add_argument("--skip-run", action="store_true")
     args = parser.parse_args()
@@ -62,6 +63,7 @@ def main() -> None:
             enable_llm=False,
             ocr_backend=backend,
             ocr_strategy=args.ocr_strategy,
+            ocr_parallelism=args.ocr_parallelism,
         )
         if result.exit_code != 0:
             raise SystemExit(f"E2E run failed: {result.message}")

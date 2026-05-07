@@ -90,6 +90,8 @@ uv run buque add-bookmarks --enable-ocr --lang ch \
 
 Pass `--ocr-strategy full-page` to skip the guided path and OCR all routed pages immediately. `BUQUE_TOC_GUIDED_CONFIRM_WINDOW` widens target-page confirmation around each inferred page number when needed; the default is `0`.
 
+OCR is serial by default. Pass `--ocr-parallelism N` with `N > 1` to run multiple OCR worker processes for rebuildable backends such as the command backend and PaddleOCR. Custom in-process backends that cannot be rebuilt in a worker process fall back to serial execution.
+
 ## Current Scope
 
 M2 supports text-based PDFs directly. A PDF is treated as text-based when enough pages contain extractable text. Scanned PDFs and sparse pages in hybrid PDFs are processed through OCR when `--enable-ocr` is set and an OCR backend is configured; otherwise scanned and hybrid PDFs are rejected with exit code `2`.
