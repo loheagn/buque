@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any
@@ -15,7 +16,7 @@ from buque.core.models import CandidateHeading, TocNode
 from buque.core.ocr_extract import OCRExtractionResult, extract_ocr_candidates
 from buque.core.tree_builder import build_toc_nodes
 from buque.core.writer import write_bookmarks
-from buque.ocr import CommandOCRBackend, NoopOCRBackend, OCRBackend
+from buque.ocr import CommandOCRBackend, NoopOCRBackend, OCRBackend, PaddleOCRBackend
 
 
 @dataclass(slots=True)
@@ -65,6 +66,8 @@ def run_add_bookmarks(
             report["page_count"] = classified.page_count
             report["text_page_ratio"] = classified.text_page_ratio
             report["text_pages"] = classified.text_pages
+            force_ocr = enable_ocr and _env_bool("BUQUE_FORCE_OCR")
+            report["feature_flags"]["force_ocr"] = force_ocr
             if classified.doc_type != "text" and not enable_ocr:
                 report["unsupported_doc_type"] = True
                 report["errors"].append("unsupported_doc_type")
@@ -79,7 +82,7 @@ def run_add_bookmarks(
                 )
 
             backend = _resolve_ocr_backend(ocr_backend)
-            if classified.doc_type != "text" and isinstance(backend, NoopOCRBackend):
+            if (force_ocr or classified.doc_type != "text") and isinstance(backend, NoopOCRBackend):
                 report["unsupported_doc_type"] = True
                 report["errors"].append("ocr_backend_unavailable")
                 return _finalize_result(
@@ -92,11 +95,14 @@ def run_add_bookmarks(
                     toc_path=toc_json_path,
                 )
 
-            text_candidates, text_stats = _extract_text_candidates(
-                doc=doc,
-                rules=config.rules,
-                score_weights=config.score_weights,
-            )
+            if force_ocr:
+                text_candidates, text_stats = [], _empty_rule_stats()
+            else:
+                text_candidates, text_stats = _extract_text_candidates(
+                    doc=doc,
+                    rules=config.rules,
+                    score_weights=config.score_weights,
+                )
             candidates = list(text_candidates)
             rule_stats = {
                 **text_stats,
@@ -109,6 +115,7 @@ def run_add_bookmarks(
                     doc_type=classified.doc_type,
                     page_char_counts=classified.page_char_counts,
                     min_text_chars_per_page=config.thresholds.min_text_chars_per_page,
+                    force_ocr=force_ocr,
                 )
                 if ocr_page_indexes:
                     ocr_result = extract_ocr_candidates(
@@ -194,9 +201,11 @@ def _split_candidates(
 
 
 def _is_high_confidence(candidate: CandidateHeading, *, high_threshold: float) -> bool:
+    if candidate.source == "ocr":
+        if candidate.semantic_score >= 0.6 and candidate.position_score >= 0.6 and candidate.total_score >= 0.5:
+            return True
+        return candidate.total_score >= max(high_threshold, 0.85)
     if candidate.total_score >= high_threshold:
-        return True
-    if candidate.source == "ocr" and candidate.semantic_score >= 0.6 and candidate.position_score >= 0.6:
         return True
     return candidate.pattern_score >= 1.0 and candidate.style_score >= 0.5
 
@@ -219,6 +228,8 @@ def _extract_text_candidates(
 def _resolve_ocr_backend(ocr_backend: OCRBackend | None) -> OCRBackend:
     if ocr_backend is not None:
         return ocr_backend
+    if os.environ.get("BUQUE_OCR_BACKEND", "").strip().lower() == "paddleocr":
+        return PaddleOCRBackend.from_environment()
     command_backend = CommandOCRBackend.from_environment()
     if command_backend is not None:
         return command_backend
@@ -230,7 +241,10 @@ def _ocr_page_indexes(
     doc_type: str,
     page_char_counts: list[int],
     min_text_chars_per_page: int,
+    force_ocr: bool = False,
 ) -> list[int]:
+    if force_ocr:
+        return list(range(len(page_char_counts)))
     if doc_type == "text":
         return []
     if doc_type == "scanned":
@@ -248,6 +262,20 @@ def _add_ocr_errors(report: dict[str, Any], ocr_result: OCRExtractionResult) -> 
     report["ocr_errors"] = ocr_result.errors
     if "ocr_backend_error" not in report["errors"]:
         report["errors"].append("ocr_backend_error")
+
+
+def _empty_rule_stats() -> dict[str, float]:
+    return {
+        "avg_style_score": 0.0,
+        "avg_position_score": 0.0,
+        "avg_pattern_score": 0.0,
+        "avg_semantic_score": 0.0,
+        "avg_total_score": 0.0,
+    }
+
+
+def _env_bool(name: str) -> bool:
+    return os.environ.get(name, "").strip().lower() in {"1", "true", "yes", "on"}
 
 
 def _new_report(*, enable_ocr: bool, enable_llm: bool) -> dict[str, Any]:
