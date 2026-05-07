@@ -1,0 +1,46 @@
+{
+  "name": "buque",
+  "version": "0.2.0",
+  "description": "Buque PDF bookmark generation tool",
+  "type": "module",
+  "license": "MIT",
+  "author": "loheagn <loheagn@icloud.com>",
+  "bin": {
+    "buque": "./dist/cli.js"
+  },
+  "exports": {
+    ".": "./dist/index.js"
+  },
+  "files": [
+    "dist",
+    "src/configs/default.yaml",
+    "README.md",
+    "README.zh-CN.md",
+    "LICENSE"
+  ],
+  "scripts": {
+    "build": "tsc -p tsconfig.json && node scripts/copy-assets.mjs",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "test": "vitest run",
+    "check:licenses": "node scripts/check-licenses.mjs",
+    "e2e:compare-outline": "node scripts/e2e-compare-outline.mjs"
+  },
+  "dependencies": {
+    "@lillallol/outline-pdf": "^4.0.0",
+    "canvas": "^3.2.3",
+    "commander": "^14.0.3",
+    "pdf-lib": "^1.17.1",
+    "pdfjs-dist": "^5.7.284",
+    "yaml": "^2.8.1",
+    "zod": "^4.1.13"
+  },
+  "devDependencies": {
+    "@types/node": "^25.0.0",
+    "tsx": "^4.21.0",
+    "typescript": "^5.9.3",
+    "vitest": "^4.1.5"
+  },
+  "engines": {
+    "node": ">=22.13.0"
+  }
+}

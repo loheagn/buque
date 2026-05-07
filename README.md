@@ -2,58 +2,65 @@
 
 For a Chinese version of this document, see [README.zh-CN.md](README.zh-CN.md).
 
-Buque(补阙) is a PDF bookmark generation tool for books. The current release focuses on the M2 scope: detecting headings in text-based, scanned, and hybrid PDFs and writing them as PDF Outlines, which are the navigation bookmarks shown in most PDF readers.
+Buque(补阙) is a PDF bookmark generation tool for books. It detects headings in text-based, scanned, and hybrid PDFs and writes them as PDF Outlines, the navigation bookmarks shown by most PDF readers.
 
-Buque does not currently generate PDF/UA Tagged PDF structure tags. OCR-backed scanned-page routing is implemented for M2. LLM review interfaces are still reserved for later stages and are not implemented yet.
+Buque does not generate PDF/UA Tagged PDF structure tags. OCR-backed scanned-page routing is implemented. The LLM switch is still reserved for a later stage and does not call an LLM resolver.
 
 ## Features
 
 - Detect text-based, scanned, and hybrid PDFs.
-- Extract text lines with font size, font name, bold flag, and page coordinates through PyMuPDF.
-- Route scanned or sparse hybrid pages through an OCR backend when `--enable-ocr` is set.
+- Extract text lines, font size, font name, bold hints, and page coordinates through PDF.js.
+- Route scanned or sparse hybrid pages through an OCR command backend when `--enable-ocr` is set.
 - Score heading candidates using style, position, numbering pattern, and semantic keyword signals.
-- Infer bookmark levels from chapter and section patterns such as `Chapter 1`, `Section 2`, `Appendix A`, and `1.2.3`.
+- Infer bookmark levels from patterns such as `Chapter 1`, `Section 2`, `Appendix A`, `第1章`, and `1.2.3`.
 - Build a deduplicated table of contents with simple level-jump protection.
 - Write bookmarks back to a new PDF.
 - Emit `toc.json` and `report.json` for inspection.
 
 ## Installation
 
-This repository uses `uv`.
+This repository uses Node.js and npm.
 
 ```bash
-uv sync
+npm install
+npm run build
 ```
 
 Run the CLI from the workspace:
 
 ```bash
-uv run buque --help
+npx buque --help
+```
+
+During development, you can run the TypeScript source directly:
+
+```bash
+npx tsx src/cli.ts --help
 ```
 
 ## Usage
 
 ```bash
-uv run buque add-bookmarks \
+npx buque add-bookmarks \
   --input ./book.pdf \
-  --output ./book.tagged.pdf \
+  --output ./book.bookmarked.pdf \
   --report ./report.json \
   --toc-json ./toc.json
 ```
 
 The command writes:
 
-- `book.tagged.pdf`: output PDF with generated bookmarks.
+- `book.bookmarked.pdf`: output PDF with generated bookmarks.
 - `toc.json`: generated bookmark nodes.
 - `report.json`: document type, candidate counts, accepted and rejected counts, rule stats, and errors.
 
-### OCR
+## OCR
 
-Scanned and hybrid PDFs require `--enable-ocr` and an OCR backend. For CLI use, set `BUQUE_OCR_COMMAND` to a command that accepts an image path and language and writes one OCR text line per stdout line:
+Scanned and hybrid PDFs require `--enable-ocr` and an OCR command. Set `BUQUE_OCR_COMMAND` to a command that accepts an image path and language and writes one OCR text line per stdout line:
 
 ```bash
 BUQUE_OCR_COMMAND='my-ocr-command' \
-uv run buque add-bookmarks --enable-ocr --lang eng \
+npx buque add-bookmarks --enable-ocr --lang eng \
   --input ./scan.pdf \
   --output ./scan.bookmarked.pdf
 ```
@@ -64,77 +71,78 @@ If the command needs custom argument placement, use `{image}` and `{lang}` place
 BUQUE_OCR_COMMAND='my-ocr-command --image {image} --lang {lang}'
 ```
 
-When PaddleOCR is installed in the active Python environment, Buque can use it in-process:
-
-```bash
-BUQUE_OCR_BACKEND=paddleocr \
-BUQUE_PADDLE_OCR_VERSION=PP-OCRv5 \
-uv run buque add-bookmarks --enable-ocr --lang ch \
-  --input ./scan.pdf \
-  --output ./scan.bookmarked.pdf
-```
-
 For scanned PDFs that also contain a noisy hidden text layer, set `BUQUE_FORCE_OCR=1` to ignore extracted text and OCR every page. `BUQUE_OCR_RENDER_SCALE` can tune OCR image resolution; higher values are slower but may improve accuracy.
 
 For scanned books, OCR defaults to the `toc-guided` strategy: Buque scans forward to the table of contents, parses its page numbers, and OCRs only the referenced target pages plus small front/tail windows. If the guided path cannot build bookmarks, it automatically falls back to full-page OCR:
 
 ```bash
 BUQUE_FORCE_OCR=1 \
-BUQUE_OCR_BACKEND=paddleocr \
 BUQUE_OCR_RENDER_SCALE=0.5 \
 BUQUE_TOC_GUIDED_TOC_RENDER_SCALE=2.0 \
-uv run buque add-bookmarks --enable-ocr --lang ch \
+npx buque add-bookmarks --enable-ocr --lang ch \
   --input ./scan.pdf \
   --output ./scan.bookmarked.pdf
 ```
 
 Pass `--ocr-strategy full-page` to skip the guided path and OCR all routed pages immediately. `BUQUE_TOC_GUIDED_CONFIRM_WINDOW` widens target-page confirmation around each inferred page number when needed; the default is `0`.
 
-OCR is serial by default. Pass `--ocr-parallelism N` with `N > 1` to run multiple OCR worker processes for rebuildable backends such as the command backend and PaddleOCR. Custom in-process backends that cannot be rebuilt in a worker process fall back to serial execution.
+OCR is serial by default. Pass `--ocr-parallelism N` with `N > 1` to run multiple OCR command processes concurrently. Custom in-process OCR backends fall back to serial execution.
 
-## Current Scope
-
-M2 supports text-based PDFs directly. A PDF is treated as text-based when enough pages contain extractable text. Scanned PDFs and sparse pages in hybrid PDFs are processed through OCR when `--enable-ocr` is set and an OCR backend is configured; otherwise scanned and hybrid PDFs are rejected with exit code `2`.
-
-The `--enable-llm` option is reserved for a later stage. Passing it records degraded LLM status in the report but does not call an LLM resolver.
+PaddleOCR is no longer an in-process backend. To use PaddleOCR, wrap it in a command and point `BUQUE_OCR_COMMAND` at that wrapper.
 
 ## Development
 
 Run tests:
 
 ```bash
-uv run pytest
+npm test
 ```
 
-Build package artifacts:
+Typecheck and build:
 
 ```bash
-uv build
+npm run typecheck
+npm run build
+```
+
+Check production dependency licenses:
+
+```bash
+npm run check:licenses
 ```
 
 ## Project Layout
 
 ```text
-buque/
-  cli.py                  # Typer CLI
+src/
+  cli.ts                  # Commander CLI
   core/
-    classify.py           # Text/scanned/hybrid classification
-    extract_text.py       # Text-line extraction via PyMuPDF
-    ocr_extract.py        # OCR page rendering and candidate conversion
-    candidate_rules.py    # Heading candidate extraction
-    scorer.py             # Rule scores and level inference
-    tree_builder.py       # TOC node construction
-    writer.py             # PDF bookmark writing
-  ocr/                    # OCR interfaces and command backend
-  llm/                    # Placeholder LLM interface
-tests/
-  test_cli_smoke.py
-  test_scorer.py
-  test_tree_builder.py
+    classify.ts           # Text/scanned/hybrid classification
+    candidate-rules.ts    # Heading candidate extraction
+    ocr-extract.ts        # OCR page rendering and candidate conversion
+    pipeline.ts           # End-to-end add-bookmarks flow
+    scorer.ts             # Rule scores and level inference
+    toc-guided.ts         # TOC-guided scanned-book OCR strategy
+    tree-builder.ts       # TOC node construction
+    writer.ts             # PDF bookmark writing
+  ocr/
+    command.ts            # OCR command backend
+  pdf/
+    document.ts           # PDF.js document adapter
+test/
+  pipeline.test.ts
+  scorer.test.ts
+  tree-builder.test.ts
 ```
+
+## License Notes
+
+The project source remains MIT licensed. Runtime PDF dependencies are MIT or Apache-2.0 licensed: PDF.js (`pdfjs-dist`), `canvas`, `pdf-lib`, and `@lillallol/outline-pdf`.
+
+MuPDF.js/PyMuPDF are intentionally not used because their open-source distribution is AGPL/commercial dual licensed. The `npm run check:licenses` guard fails if AGPL/GPL/LGPL dependencies appear in the lockfile.
 
 ## Limitations
 
 - No LLM resolver, retry, schema validation, or cache yet.
 - No benchmark dataset or precision/recall evaluation harness yet.
-- Real-world books with complex layouts may still need rule tuning.
+- PDF.js text extraction can expose font and coordinate details differently from PyMuPDF, so complex book layouts may still need rule tuning.
