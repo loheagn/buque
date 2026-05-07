@@ -2,13 +2,15 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+import sys
 
 import fitz
 from typer.testing import CliRunner
 
 from buque.cli import app
+from buque.core.ocr_extract import run_ocr_pages
 from buque.core.pipeline import run_add_bookmarks
-from buque.ocr import OCRLine, OCRTextLine
+from buque.ocr import CommandOCRBackend, OCRLine, OCRTextLine
 
 runner = CliRunner()
 
@@ -28,10 +30,11 @@ def _build_text_pdf(path: Path) -> None:
     doc.close()
 
 
-def _build_scanned_like_pdf(path: Path) -> None:
+def _build_scanned_like_pdf(path: Path, *, page_count: int = 1) -> None:
     doc = fitz.open()
-    page = doc.new_page()
-    page.draw_rect(fitz.Rect(50, 50, 500, 700), color=(0, 0, 0), fill=(0.9, 0.9, 0.9))
+    for _index in range(page_count):
+        page = doc.new_page()
+        page.draw_rect(fitz.Rect(50, 50, 500, 700), color=(0, 0, 0), fill=(0.9, 0.9, 0.9))
     doc.save(path)
     doc.close()
 
@@ -187,6 +190,9 @@ def test_pipeline_processes_scanned_document_with_ocr_backend(tmp_path: Path) ->
     assert report["doc_type"] == "scanned"
     assert report["feature_flags"]["ocr_executed"] is True
     assert report["rule_stats"]["ocr_pages_attempted"] == 1
+    assert report["feature_flags"]["ocr_parallelism_requested"] == 1
+    assert report["feature_flags"]["ocr_parallelism_effective"] == 1
+    assert report["feature_flags"]["ocr_parallel_mode"] == "serial"
     assert report["accepted_count"] == 2
 
 
@@ -306,3 +312,101 @@ def test_pipeline_default_toc_guided_falls_back_to_full_page(tmp_path: Path) -> 
     assert report["feature_flags"]["ocr_strategy"] == "toc-guided"
     assert report["feature_flags"]["toc_guided_executed"] is True
     assert "toc_guided_fallback_full_page" in report["errors"]
+
+
+def test_ocr_page_runner_parallelizes_rebuildable_command_backend(tmp_path: Path) -> None:
+    input_pdf = tmp_path / "scan.pdf"
+    _build_scanned_like_pdf(input_pdf, page_count=3)
+    script_path = tmp_path / "ocr_stub.py"
+    script_path.write_text("print('Chapter 1 OCR')\n", encoding="utf-8")
+    backend = CommandOCRBackend(f"{sys.executable} {script_path}")
+
+    with fitz.open(input_pdf) as doc:
+        result = run_ocr_pages(
+            doc,
+            page_indexes=[2, 0, 1],
+            backend=backend,
+            lang="eng",
+            render_scale=0.5,
+            ocr_parallelism=2,
+        )
+
+    assert list(result.page_lines) == [0, 1, 2]
+    assert result.stats["ocr_parallelism_requested"] == 2.0
+    assert result.stats["ocr_parallelism_effective"] == 2.0
+    assert result.stats["ocr_parallel_mode"] == "process"
+    assert result.errors == []
+
+
+def test_custom_backend_parallel_request_falls_back_to_serial(tmp_path: Path) -> None:
+    input_pdf = tmp_path / "scan.pdf"
+    _build_scanned_like_pdf(input_pdf, page_count=2)
+    backend = _StaticOCRBackend([OCRTextLine("Chapter 1 OCR", bbox=(80, 80, 420, 200), confidence=0.98)])
+
+    with fitz.open(input_pdf) as doc:
+        result = run_ocr_pages(
+            doc,
+            page_indexes=[0, 1],
+            backend=backend,
+            lang="eng",
+            render_scale=0.5,
+            ocr_parallelism=2,
+        )
+
+    assert backend.calls == 2
+    assert result.stats["ocr_parallelism_requested"] == 2.0
+    assert result.stats["ocr_parallelism_effective"] == 1.0
+    assert result.stats["ocr_parallel_mode"] == "serial"
+    assert result.stats["ocr_parallel_fallback_to_serial"] == 1.0
+
+
+def test_toc_guided_fallback_full_page_uses_requested_parallelism(tmp_path: Path) -> None:
+    input_pdf = tmp_path / "scan.pdf"
+    output_pdf = tmp_path / "scan.tagged.pdf"
+    report_path = tmp_path / "report.json"
+    toc_path = tmp_path / "toc.json"
+    _build_scanned_like_pdf(input_pdf, page_count=3)
+    script_path = tmp_path / "ocr_stub.py"
+    script_path.write_text("print('Chapter 1 OCR')\n", encoding="utf-8")
+    backend = CommandOCRBackend(f"{sys.executable} {script_path}")
+
+    result = run_add_bookmarks(
+        input_path=input_pdf,
+        output_path=output_pdf,
+        report_path=report_path,
+        toc_json_path=toc_path,
+        lang="eng",
+        enable_ocr=True,
+        enable_llm=False,
+        ocr_backend=backend,
+        ocr_parallelism=2,
+    )
+
+    assert result.exit_code == 0
+    report = json.loads(report_path.read_text(encoding="utf-8"))
+    assert "toc_guided_fallback_full_page" in report["errors"]
+    assert report["feature_flags"]["ocr_parallelism_requested"] == 2
+    assert report["feature_flags"]["ocr_parallelism_effective"] == 2
+    assert report["feature_flags"]["ocr_parallel_mode"] == "process"
+
+
+def test_cli_rejects_invalid_ocr_parallelism(tmp_path: Path) -> None:
+    input_pdf = tmp_path / "book.pdf"
+    output_pdf = tmp_path / "book.tagged.pdf"
+    _build_text_pdf(input_pdf)
+
+    result = runner.invoke(
+        app,
+        [
+            "add-bookmarks",
+            "--input",
+            str(input_pdf),
+            "--output",
+            str(output_pdf),
+            "--ocr-parallelism",
+            "0",
+        ],
+    )
+
+    assert result.exit_code != 0
+    assert not output_pdf.exists()

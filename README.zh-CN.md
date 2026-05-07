@@ -88,6 +88,8 @@ uv run buque add-bookmarks --enable-ocr --lang ch \
 
 传入 `--ocr-strategy full-page` 可跳过 guided 路径，直接 OCR 所有路由页面。必要时可通过 `BUQUE_TOC_GUIDED_CONFIRM_WINDOW` 扩大每个推导页码附近的确认范围；默认值为 `0`。
 
+OCR 默认串行执行。传入 `--ocr-parallelism N` 且 `N > 1` 时，会为可重建的后端（例如命令后端和 PaddleOCR）启动多个 OCR worker 进程。无法在 worker 中重建的自定义进程内后端会自动降级为串行执行。
+
 ## 当前范围
 
 M2 可直接处理文本型 PDF。当 PDF 中有足够多页面包含可提取文本时，会被视为文本型 PDF。扫描版 PDF 和混合版 PDF 中的稀疏文本页会在设置 `--enable-ocr` 且配置 OCR 后端后通过 OCR 处理；否则会以退出码 `2` 拒绝。
