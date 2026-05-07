@@ -1,9 +1,12 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import re
 
 from buque.core.models import CandidateHeading, TocNode
 from buque.core.scorer import normalize_title
+
+_STRUCTURAL_HEADING_RE = re.compile(r"^\s*(第[零一二三四五六七八九十百千万〇\d]+[卷章])")
 
 
 @dataclass(slots=True)
@@ -17,6 +20,7 @@ def build_toc_nodes(candidates: list[CandidateHeading], *, max_level_jump: int =
     seen: set[tuple[int, str]] = set()
     toc_nodes: list[TocNode] = []
     rejected: list[dict[str, object]] = []
+    seen_structural_keys: set[str] = set()
     prev_level: int | None = None
     for candidate in sorted_candidates:
         title = normalize_title(candidate.text)
@@ -29,6 +33,13 @@ def build_toc_nodes(candidates: list[CandidateHeading], *, max_level_jump: int =
             rejected.append(_reject(candidate, "duplicate_same_page"))
             continue
         seen.add(dedupe_key)
+
+        structural_key = _structural_key(title)
+        if structural_key and structural_key in seen_structural_keys:
+            rejected.append(_reject(candidate, "duplicate_structural_heading"))
+            continue
+        if structural_key:
+            seen_structural_keys.add(structural_key)
 
         level = max(1, min(6, candidate.level_hint or 1))
         if prev_level is None and level > 1:
@@ -57,3 +68,10 @@ def _reject(candidate: CandidateHeading, reason: str) -> dict[str, object]:
         "reason": reason,
         "score": candidate.total_score,
     }
+
+
+def _structural_key(title: str) -> str:
+    matched = _STRUCTURAL_HEADING_RE.match(title.replace(" ", ""))
+    if not matched:
+        return ""
+    return matched.group(1)

@@ -62,6 +62,18 @@ uv run buque add-bookmarks --enable-ocr --lang eng \
 BUQUE_OCR_COMMAND='my-ocr-command --image {image} --lang {lang}'
 ```
 
+如果当前 Python 环境已经安装 PaddleOCR，Buque 可以在进程内直接使用它：
+
+```bash
+BUQUE_OCR_BACKEND=paddleocr \
+BUQUE_PADDLE_OCR_VERSION=PP-OCRv5 \
+uv run buque add-bookmarks --enable-ocr --lang ch \
+  --input ./scan.pdf \
+  --output ./scan.bookmarked.pdf
+```
+
+对于影印版但带有噪声隐藏文本层的 PDF，可设置 `BUQUE_FORCE_OCR=1` 忽略提取文本并对每页执行 OCR。`BUQUE_OCR_RENDER_SCALE` 可调整 OCR 渲染分辨率；数值越大通常越慢，但可能提升准确率。
+
 ## 当前范围
 
 M2 可直接处理文本型 PDF。当 PDF 中有足够多页面包含可提取文本时，会被视为文本型 PDF。扫描版 PDF 和混合版 PDF 中的稀疏文本页会在设置 `--enable-ocr` 且配置 OCR 后端后通过 OCR 处理；否则会以退出码 `2` 拒绝。

@@ -64,6 +64,18 @@ If the command needs custom argument placement, use `{image}` and `{lang}` place
 BUQUE_OCR_COMMAND='my-ocr-command --image {image} --lang {lang}'
 ```
 
+When PaddleOCR is installed in the active Python environment, Buque can use it in-process:
+
+```bash
+BUQUE_OCR_BACKEND=paddleocr \
+BUQUE_PADDLE_OCR_VERSION=PP-OCRv5 \
+uv run buque add-bookmarks --enable-ocr --lang ch \
+  --input ./scan.pdf \
+  --output ./scan.bookmarked.pdf
+```
+
+For scanned PDFs that also contain a noisy hidden text layer, set `BUQUE_FORCE_OCR=1` to ignore extracted text and OCR every page. `BUQUE_OCR_RENDER_SCALE` can tune OCR image resolution; higher values are slower but may improve accuracy.
+
 ## Current Scope
 
 M2 supports text-based PDFs directly. A PDF is treated as text-based when enough pages contain extractable text. Scanned PDFs and sparse pages in hybrid PDFs are processed through OCR when `--enable-ocr` is set and an OCR backend is configured; otherwise scanned and hybrid PDFs are rejected with exit code `2`.

@@ -8,6 +8,7 @@ from typer.testing import CliRunner
 
 from buque.cli import app
 from buque.core.pipeline import run_add_bookmarks
+from buque.ocr import OCRLine, OCRTextLine
 
 runner = CliRunner()
 
@@ -48,11 +49,11 @@ def _build_hybrid_pdf(path: Path) -> None:
 
 
 class _StaticOCRBackend:
-    def __init__(self, lines: list[str]) -> None:
+    def __init__(self, lines: list[OCRLine]) -> None:
         self.lines = lines
         self.calls = 0
 
-    def extract(self, *, page_image_bytes: bytes, lang: str) -> list[str]:
+    def extract(self, *, page_image_bytes: bytes, lang: str) -> list[OCRLine]:
         assert page_image_bytes
         assert lang
         self.calls += 1
@@ -140,7 +141,13 @@ def test_pipeline_processes_scanned_document_with_ocr_backend(tmp_path: Path) ->
     report_path = tmp_path / "report.json"
     toc_path = tmp_path / "toc.json"
     _build_scanned_like_pdf(input_pdf)
-    ocr_backend = _StaticOCRBackend(["Chapter 1 OCR", "1.1 OCR Background", "Plain body text"])
+    ocr_backend = _StaticOCRBackend(
+        [
+            OCRTextLine("Chapter 1 OCR", bbox=(80, 80, 420, 200), confidence=0.98),
+            OCRTextLine("1.1 OCR Background", bbox=(80, 240, 420, 360), confidence=0.98),
+            OCRTextLine("Plain body text", bbox=(80, 300, 420, 322), confidence=0.98),
+        ]
+    )
 
     result = run_add_bookmarks(
         input_path=input_pdf,
@@ -173,7 +180,9 @@ def test_pipeline_routes_only_sparse_pages_for_hybrid_ocr(tmp_path: Path) -> Non
     report_path = tmp_path / "report.json"
     toc_path = tmp_path / "toc.json"
     _build_hybrid_pdf(input_pdf)
-    ocr_backend = _StaticOCRBackend(["1.1 Scanned Section"])
+    ocr_backend = _StaticOCRBackend(
+        [OCRTextLine("1.1 Scanned Section", bbox=(80, 80, 420, 200), confidence=0.98)]
+    )
 
     result = run_add_bookmarks(
         input_path=input_pdf,
